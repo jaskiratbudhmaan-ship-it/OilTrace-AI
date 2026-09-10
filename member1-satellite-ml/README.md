@@ -1,112 +1,61 @@
-# OilTrace AI — Member 1 Satellite + ML Module
+# OilTrace AI — Member 1 Complete
 
-This folder contains **Part 1** of the Member 1 implementation for the marine oil-spill detection project.
+Member 1 scope:
 
-## Member 1 responsibility
+Sentinel-1 SAR image → preprocessing → real dataset → U-Net segmentation → training → evaluation → oil mask → polygon → confidence.
 
-The Member 1 pipeline will eventually be:
+## Commands
 
-**Sentinel-1 SAR image → preprocessing → dataset loader → U-Net semantic segmentation → oil-spill mask → polygon → confidence**
-
-Part 1 only prepares the development environment and project structure.
-
-## Folder structure
-
-```text
-member1-satellite-ml/
-├── data/
-│   ├── raw/
-│   │   ├── images/
-│   │   └── masks/
-│   └── processed/
-│       ├── train/
-│       │   ├── images/
-│       │   └── masks/
-│       ├── val/
-│       │   ├── images/
-│       │   └── masks/
-│       └── test/
-│           ├── images/
-│           └── masks/
-├── src/
-│   ├── preprocessing/
-│   ├── dataset/
-│   ├── models/
-│   └── utils/
-├── scripts/
-├── models/
-├── outputs/
-│   ├── masks/
-│   ├── overlays/
-│   └── metrics/
-├── config.py
-├── requirements.txt
-├── check_project.py
-├── .gitignore
-└── README.md
-```
-
-## Setup on macOS
-
-Open this folder in VS Code and open **Terminal → New Terminal**.
-
-Create a virtual environment:
-
+### 1. Setup
 ```bash
-python3 -m venv .venv
+chmod +x setup_mac.sh
+./setup_mac.sh
 ```
 
-Activate it:
-
+### 2. Download real dataset
 ```bash
 source .venv/bin/activate
+python scripts/download_dataset.py
 ```
 
-Upgrade pip:
-
+### 3. Extract dataset
+If needed:
 ```bash
-python -m pip install --upgrade pip
+brew install unar
 ```
 
-Install dependencies:
-
+Then:
 ```bash
-pip install -r requirements.txt
+python scripts/extract_dataset.py
 ```
 
-Check the configuration:
-
+### 4. Prepare dataset
 ```bash
-python config.py
+python scripts/prepare_dataset.py
+python scripts/check_dataset.py
+python scripts/test_dataset_loader.py
 ```
 
-Verify the complete setup:
-
+### 5. Train
 ```bash
-python check_project.py
+python train.py
 ```
 
-When everything is correct, the final line should say:
+### 6. Evaluate
+```bash
+python evaluate.py
+```
 
+### 7. Predict on a processed/test SAR image
+```bash
+python predict.py data/processed/test/images/test_0000.png
+```
+
+Prediction outputs appear in:
 ```text
-✓ PART 1 SETUP SUCCESSFUL
-Project is ready for Part 2: real Sentinel-1 dataset.
+outputs/predictions/
 ```
 
-## Git commands
-
-From the root `OilTrace-AI` repository:
-
-```bash
-git add .
-git commit -m "Complete Member 1 Part 1 project setup"
-git push origin main
-```
-
-## Important
-
-Large satellite datasets, processed images, generated outputs and trained model weights are intentionally excluded from Git through `.gitignore`.
-
-## Next
-
-**Part 2:** Real Sentinel-1 oil-spill dataset preparation and preprocessing.
+## Real dataset
+Zenodo record: 4672426
+Oil Spill Segmentation dataset, Sentinel-1A GRD VV, Gulf of Mexico.

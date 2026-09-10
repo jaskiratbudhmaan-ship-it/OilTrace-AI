@@ -1,55 +1,29 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Virtual environment
 .venv/
-venv/
-env/
-
-# macOS
 .DS_Store
-
-# VS Code
 .vscode/
-
-# Secrets
 .env
-
-# Raw datasets: keep folders, ignore contents
+data/downloads/*
+!data/downloads/.gitkeep
+data/extracted/*
+!data/extracted/.gitkeep
 data/raw/images/*
 !data/raw/images/.gitkeep
 data/raw/masks/*
 !data/raw/masks/.gitkeep
-
-# Processed datasets: keep folders, ignore contents
-data/processed/train/images/*
+data/processed/**/*
 !data/processed/train/images/.gitkeep
-data/processed/train/masks/*
 !data/processed/train/masks/.gitkeep
-
-data/processed/val/images/*
 !data/processed/val/images/.gitkeep
-data/processed/val/masks/*
 !data/processed/val/masks/.gitkeep
-
-data/processed/test/images/*
 !data/processed/test/images/.gitkeep
-data/processed/test/masks/*
 !data/processed/test/masks/.gitkeep
-
-# Trained models
 models/*
 !models/.gitkeep
-
-# Generated outputs
-outputs/masks/*
+outputs/**/*
 !outputs/masks/.gitkeep
-outputs/overlays/*
 !outputs/overlays/.gitkeep
-outputs/metrics/*
 !outputs/metrics/.gitkeep
-
-# Notebook checkpoints
-.ipynb_checkpoints/
+!outputs/dataset_preview/.gitkeep
+!outputs/predictions/.gitkeep
