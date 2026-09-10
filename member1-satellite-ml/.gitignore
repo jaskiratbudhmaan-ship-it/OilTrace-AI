@@ -27,3 +27,8 @@ outputs/**/*
 !outputs/metrics/.gitkeep
 !outputs/dataset_preview/.gitkeep
 !outputs/predictions/.gitkeep
+# Sentinel-1 downloaded / processed data
+data/sentinel1/
+
+# Extra generated outputs
+outputs/sentinel1_real/
