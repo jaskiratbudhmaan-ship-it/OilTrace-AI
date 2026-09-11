@@ -34,6 +34,14 @@ INPUT_TIF = (
     / "sentinel1_gulf_vv_geocoded.tif"
 )
 
+METADATA_FILE = (
+    BASE_DIR
+    / "data"
+    / "sentinel1"
+    / "processed"
+    / "latest_scene.json"
+)
+
 OUTPUT_DIR = (
     BASE_DIR
     / "outputs"
@@ -47,27 +55,10 @@ OUTPUT_DIR.mkdir(
 
 
 # ============================================================
-# SENTINEL-1 SCENE METADATA
-# ============================================================
-
-SOURCE_PRODUCT = (
-    "S1D_IW_GRDH_1SDV_"
-    "20260908T000923_"
-    "20260908T000948_"
-    "004479_0084FE_D121_COG.SAFE"
-)
-
-ACQUISITION_TIMESTAMP = (
-    "2026-09-08T00:09:23Z"
-)
-
-
-# ============================================================
 # SETTINGS
 # ============================================================
 
 TILE_SIZE = 256
-
 MIN_COMPONENT_AREA = 50
 
 GEOD = Geod(
@@ -76,7 +67,31 @@ GEOD = Geod(
 
 
 # ============================================================
-# NORMALIZATION
+# LOAD LATEST SCENE METADATA
+# ============================================================
+
+def load_scene_metadata():
+
+    if not METADATA_FILE.exists():
+
+        return {
+            "source": "Copernicus Sentinel-1",
+            "source_product": None,
+            "acquisition_timestamp": None,
+            "platform": None,
+            "polarization": ["VV"],
+            "instrument_mode": "IW",
+        }
+
+    return json.loads(
+        METADATA_FILE.read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+# ============================================================
+# NORMALIZE SAR
 # ============================================================
 
 def normalize_sar(
@@ -128,8 +143,7 @@ def normalize_sar(
     output[
         valid_mask
     ] = (
-        clipped[valid_mask]
-        - low
+        clipped[valid_mask] - low
     ) / (
         high - low
     )
@@ -142,7 +156,7 @@ def normalize_sar(
 
 
 # ============================================================
-# MODEL
+# LOAD TRAINED U-NET
 # ============================================================
 
 def load_model():
@@ -203,7 +217,7 @@ def predict_tile(
 
 
 # ============================================================
-# MASK CLEANING
+# FALSE-POSITIVE CLEANING
 # ============================================================
 
 def clean_mask(
@@ -243,16 +257,12 @@ def clean_mask(
     )
 
     dilated_invalid = cv2.dilate(
-
         invalid_mask,
-
         np.ones(
             (5, 5),
             np.uint8
         ),
-
         iterations=1
-
     ).astype(
         bool
     )
@@ -277,32 +287,10 @@ def clean_mask(
         )
 
         touches_image_border = (
-
-            component[
-                0,
-                :
-            ].any()
-
-            or
-
-            component[
-                height - 1,
-                :
-            ].any()
-
-            or
-
-            component[
-                :,
-                0
-            ].any()
-
-            or
-
-            component[
-                :,
-                width - 1
-            ].any()
+            component[0, :].any()
+            or component[height - 1, :].any()
+            or component[:, 0].any()
+            or component[:, width - 1].any()
         )
 
         touches_invalid_boundary = (
@@ -314,7 +302,6 @@ def clean_mask(
             touches_image_border
             or touches_invalid_boundary
         ):
-
             continue
 
         cleaned[
@@ -358,33 +345,35 @@ def calculate_area_km2(
 
 def main():
 
-    print(
-        "=" * 72
-    )
-
+    print("=" * 72)
     print(
         "OILTRACE AI - MEMBER 1 REAL SENTINEL-1 PIPELINE"
     )
+    print("=" * 72)
 
-    print(
-        "=" * 72
+    scene_metadata = (
+        load_scene_metadata()
     )
 
+    print(
+        "Scene:",
+        scene_metadata.get(
+            "source_product"
+        )
+    )
 
-    # --------------------------------------------------------
-    # CHECK INPUT
-    # --------------------------------------------------------
+    print(
+        "Acquisition time:",
+        scene_metadata.get(
+            "acquisition_timestamp"
+        )
+    )
 
     if not INPUT_TIF.exists():
 
         raise FileNotFoundError(
-            INPUT_TIF
+            f"Input GeoTIFF not found:\n{INPUT_TIF}"
         )
-
-
-    # --------------------------------------------------------
-    # LOAD MODEL
-    # --------------------------------------------------------
 
     model = load_model()
 
@@ -392,45 +381,21 @@ def main():
         "✓ U-Net model loaded"
     )
 
-
-    # --------------------------------------------------------
-    # READ SENTINEL-1 GEOTIFF
-    # --------------------------------------------------------
-
     with rasterio.open(
         INPUT_TIF
     ) as src:
 
         # Band 1 = VV
-        vv = src.read(
-            1
-        )
+        vv = src.read(1)
 
-        # Band 2 = dataMask
-        data_mask = src.read(
-            2
-        )
+        # Band 2 = Sentinel Hub dataMask
+        data_mask = src.read(2)
 
-        transform = (
-            src.transform
-        )
-
-        crs = (
-            src.crs
-        )
-
-        width = (
-            src.width
-        )
-
-        height = (
-            src.height
-        )
-
-        bounds = (
-            src.bounds
-        )
-
+        transform = src.transform
+        crs = src.crs
+        width = src.width
+        height = src.height
+        bounds = src.bounds
 
     print(
         "✓ Sentinel-1 VV GeoTIFF loaded"
@@ -453,10 +418,9 @@ def main():
         bounds
     )
 
-
-    # --------------------------------------------------------
-    # VALID SAR AREA
-    # --------------------------------------------------------
+    # ========================================================
+    # VALID DATA
+    # ========================================================
 
     valid_mask = (
         data_mask > 0
@@ -471,10 +435,9 @@ def main():
         valid_pixels
     )
 
-
-    # --------------------------------------------------------
+    # ========================================================
     # NORMALIZATION
-    # --------------------------------------------------------
+    # ========================================================
 
     vv = normalize_sar(
         vv,
@@ -485,10 +448,9 @@ def main():
         "✓ SAR normalization complete"
     )
 
-
-    # --------------------------------------------------------
-    # TILE-WISE MODEL INFERENCE
-    # --------------------------------------------------------
+    # ========================================================
+    # TILE-WISE INFERENCE
+    # ========================================================
 
     final_probability = np.zeros(
         (
@@ -513,9 +475,7 @@ def main():
     )
 
     tile_counter = 0
-
     model_tiles = 0
-
 
     for y in range(
         0,
@@ -551,8 +511,6 @@ def main():
                 x:x + valid_w
             ]
 
-
-            # no satellite data
             if not tile_mask.any():
 
                 print(
@@ -563,7 +521,6 @@ def main():
                 )
 
                 continue
-
 
             padded = np.zeros(
                 (
@@ -578,7 +535,6 @@ def main():
                 :valid_w
             ] = tile
 
-
             probability = predict_tile(
                 model,
                 padded
@@ -589,20 +545,16 @@ def main():
                 :valid_w
             ]
 
-
             probability[
                 ~tile_mask
             ] = 0
-
 
             final_probability[
                 y:y + valid_h,
                 x:x + valid_w
             ] = probability
 
-
             model_tiles += 1
-
 
             print(
                 f"\rTiles: "
@@ -610,7 +562,6 @@ def main():
                 f"{total_tiles}",
                 end=""
             )
-
 
     print()
 
@@ -623,10 +574,9 @@ def main():
         model_tiles
     )
 
-
-    # --------------------------------------------------------
+    # ========================================================
     # THRESHOLD
-    # --------------------------------------------------------
+    # ========================================================
 
     final_mask = (
         final_probability
@@ -639,10 +589,9 @@ def main():
         ~valid_mask
     ] = 0
 
-
-    # --------------------------------------------------------
-    # POST PROCESSING
-    # --------------------------------------------------------
+    # ========================================================
+    # CLEAN FALSE POSITIVES
+    # ========================================================
 
     final_mask = clean_mask(
         final_mask,
@@ -654,10 +603,9 @@ def main():
         "✓ False-positive cleaning complete"
     )
 
-
-    # --------------------------------------------------------
-    # BASIC STATISTICS
-    # --------------------------------------------------------
+    # ========================================================
+    # BASIC STATS
+    # ========================================================
 
     oil_pixels = int(
         final_mask.sum()
@@ -667,94 +615,67 @@ def main():
         oil_pixels > 0
     )
 
-
     oil_fraction = (
-
-        oil_pixels
-        / valid_pixels
-
+        oil_pixels / valid_pixels
         if valid_pixels > 0
-
         else 0.0
     )
 
-
-    # --------------------------------------------------------
+    # ========================================================
     # CONFIDENCE
-    # --------------------------------------------------------
+    # ========================================================
 
     if spill_detected:
 
         detection_confidence = float(
-
             final_probability[
                 final_mask == 1
             ].mean()
-
         )
 
     else:
 
         detection_confidence = None
 
-
     max_candidate_probability = (
-
         float(
             final_probability[
                 valid_mask
             ].max()
         )
-
         if valid_mask.any()
-
         else 0.0
     )
 
-
-    # --------------------------------------------------------
-    # CREATE GEO POLYGONS
-    # --------------------------------------------------------
+    # ========================================================
+    # GEO POLYGONS
+    # ========================================================
 
     polygon_objects = []
-
     geojson_features = []
 
-
     for geometry, value in shapes(
-
         final_mask,
-
         mask=(
             final_mask.astype(bool)
             & valid_mask
         ),
-
         transform=transform
-
     ):
 
-        if int(
-            value
-        ) != 1:
-
+        if int(value) != 1:
             continue
-
 
         polygon = shape(
             geometry
         )
 
-
         if polygon.is_empty:
-
             continue
-
 
         polygon_objects.append(
             polygon
         )
-
 
         polygon_area = (
             calculate_area_km2(
@@ -762,21 +683,15 @@ def main():
             )
         )
 
-
         geojson_features.append(
-
             {
+                "type": "Feature",
 
-                "type":
-                "Feature",
-
-                "geometry":
-                mapping(
+                "geometry": mapping(
                     polygon
                 ),
 
                 "properties": {
-
                     "class":
                     "candidate_oil_spill",
 
@@ -784,20 +699,23 @@ def main():
                     polygon_area,
 
                     "timestamp":
-                    ACQUISITION_TIMESTAMP
+                    scene_metadata.get(
+                        "acquisition_timestamp"
+                    )
                 }
             }
         )
 
-
-    # --------------------------------------------------------
+    # ========================================================
     # TOTAL AREA + CENTROID
-    # --------------------------------------------------------
+    # ========================================================
 
     if polygon_objects:
 
-        merged_geometry = unary_union(
-            polygon_objects
+        merged_geometry = (
+            unary_union(
+                polygon_objects
+            )
         )
 
         spill_area_km2 = (
@@ -810,8 +728,7 @@ def main():
             merged_geometry.centroid
         )
 
-        centroid_location = {
-
+        spill_location = {
             "lat":
             float(
                 centroid.y
@@ -826,16 +743,13 @@ def main():
     else:
 
         spill_area_km2 = 0.0
+        spill_location = None
 
-        centroid_location = None
-
-
-    # --------------------------------------------------------
+    # ========================================================
     # GEOJSON
-    # --------------------------------------------------------
+    # ========================================================
 
     geojson = {
-
         "type":
         "FeatureCollection",
 
@@ -843,27 +757,22 @@ def main():
         geojson_features
     }
 
-
     geojson_path = (
         OUTPUT_DIR
         / "oil_spill.geojson"
     )
 
-
     geojson_path.write_text(
-
         json.dumps(
             geojson,
             indent=2
         ),
-
         encoding="utf-8"
     )
 
-
-    # --------------------------------------------------------
-    # VISUAL OUTPUTS
-    # --------------------------------------------------------
+    # ========================================================
+    # IMAGE OUTPUTS
+    # ========================================================
 
     vv_png = (
         vv
@@ -875,7 +784,6 @@ def main():
         np.uint8
     )
 
-
     probability_png = (
         final_probability
         * 255
@@ -886,7 +794,6 @@ def main():
         np.uint8
     )
 
-
     mask_png = (
         final_mask
         * 255
@@ -894,26 +801,20 @@ def main():
         np.uint8
     )
 
-
     overlay = np.full(
-
         (
             height,
             width,
             3
         ),
-
         128,
-
         dtype=np.uint8
     )
-
 
     vv_rgb = cv2.cvtColor(
         vv_png,
         cv2.COLOR_GRAY2BGR
     )
-
 
     overlay[
         valid_mask
@@ -921,8 +822,7 @@ def main():
         valid_mask
     ]
 
-
-    # red = candidate oil
+    # red candidate spill areas
     overlay[
         final_mask == 1
     ] = (
@@ -930,7 +830,6 @@ def main():
         0,
         255
     )
-
 
     cv2.imwrite(
         str(
@@ -940,7 +839,6 @@ def main():
         vv_png
     )
 
-
     cv2.imwrite(
         str(
             OUTPUT_DIR
@@ -948,7 +846,6 @@ def main():
         ),
         probability_png
     )
-
 
     cv2.imwrite(
         str(
@@ -958,7 +855,6 @@ def main():
         mask_png
     )
 
-
     cv2.imwrite(
         str(
             OUTPUT_DIR
@@ -967,30 +863,48 @@ def main():
         overlay
     )
 
-
-    # --------------------------------------------------------
-    # FINAL MEMBER 1 OUTPUT
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL MEMBER 1 RESULT
+    # ========================================================
 
     result = {
 
         "source":
-        "Copernicus Sentinel-1",
+        scene_metadata.get(
+            "source",
+            "Copernicus Sentinel-1"
+        ),
 
         "source_product":
-        SOURCE_PRODUCT,
+        scene_metadata.get(
+            "source_product"
+        ),
+
+        "platform":
+        scene_metadata.get(
+            "platform"
+        ),
 
         "polarization":
-        "VV",
+        scene_metadata.get(
+            "polarization"
+        ),
+
+        "instrument_mode":
+        scene_metadata.get(
+            "instrument_mode"
+        ),
 
         "acquisition_timestamp":
-        ACQUISITION_TIMESTAMP,
+        scene_metadata.get(
+            "acquisition_timestamp"
+        ),
 
         "spill_detected":
         spill_detected,
 
         "spill_location":
-        centroid_location,
+        spill_location,
 
         "spill_area_km2":
         spill_area_km2,
@@ -1024,15 +938,10 @@ def main():
         ),
 
         "bounds": [
-
             bounds.left,
-
             bounds.bottom,
-
             bounds.right,
-
             bounds.top
-
         ],
 
         "spill_polygon_geojson":
@@ -1049,7 +958,8 @@ def main():
         (
             "candidate_spill_detected"
             if spill_detected
-            else "no_reliable_candidate_detected"
+            else
+            "no_reliable_candidate_detected"
         ),
 
         "note":
@@ -1060,42 +970,26 @@ def main():
         )
     }
 
-
     result_path = (
         OUTPUT_DIR
         / "result.json"
     )
 
-
     result_path.write_text(
-
         json.dumps(
             result,
             indent=2
         ),
-
         encoding="utf-8"
     )
 
-
-    # --------------------------------------------------------
-    # TERMINAL OUTPUT
-    # --------------------------------------------------------
-
     print()
 
-    print(
-        "=" * 72
-    )
-
+    print("=" * 72)
     print(
         "MEMBER 1 FINAL OUTPUT"
     )
-
-    print(
-        "=" * 72
-    )
-
+    print("=" * 72)
 
     print(
         json.dumps(
@@ -1103,7 +997,6 @@ def main():
             indent=2
         )
     )
-
 
     print()
 
@@ -1115,9 +1008,7 @@ def main():
         OUTPUT_DIR
     )
 
-    print(
-        "=" * 72
-    )
+    print("=" * 72)
 
 
 if __name__ == "__main__":
