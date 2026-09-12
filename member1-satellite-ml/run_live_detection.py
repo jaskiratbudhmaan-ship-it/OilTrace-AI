@@ -11,15 +11,10 @@ from dotenv import load_dotenv
 
 
 # ============================================================
-# LOAD ENV
+# ENV + PATHS
 # ============================================================
 
 load_dotenv()
-
-
-# ============================================================
-# PATHS
-# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -61,19 +56,6 @@ OVERLAY_PATH = (
 
 
 # ============================================================
-# ANALYSIS AREA
-# Gulf of Mexico AOI
-# ============================================================
-
-BBOX = [
-    -90.5,   # West
-    27.5,    # South
-    -89.5,   # East
-    28.5     # North
-]
-
-
-# ============================================================
 # COPERNICUS ENDPOINTS
 # ============================================================
 
@@ -92,20 +74,275 @@ PROCESS_URL = (
 
 
 # ============================================================
-# STEP 1
-# SEARCH LATEST SENTINEL-1 SCENE
+# DEFAULT AOI
 # ============================================================
 
-def search_latest_scene():
+DEFAULT_BBOX = [
+    -90.5,
+    27.5,
+    -89.5,
+    28.5
+]
 
-    now = datetime.now(
-        timezone.utc
+
+# ============================================================
+# AREA INPUT
+# ============================================================
+
+def get_user_bbox():
+
+    print()
+    print("=" * 70)
+    print("SELECT AREA TO ANALYSE")
+    print("=" * 70)
+
+    print(
+        "Press ENTER / choose n to use default Gulf of Mexico AOI."
     )
 
-    start = (
-        now
-        - timedelta(days=14)
+    choice = input(
+        "Use custom area? (y/n): "
+    ).strip().lower()
+
+    if choice != "y":
+
+        print(
+            "✓ Using default AOI:",
+            DEFAULT_BBOX
+        )
+
+        return DEFAULT_BBOX
+
+    try:
+
+        west = float(
+            input("West longitude: ").strip()
+        )
+
+        south = float(
+            input("South latitude: ").strip()
+        )
+
+        east = float(
+            input("East longitude: ").strip()
+        )
+
+        north = float(
+            input("North latitude: ").strip()
+        )
+
+    except ValueError:
+
+        raise ValueError(
+            "Coordinates must be numeric."
+        )
+
+    if west >= east:
+
+        raise ValueError(
+            "West longitude must be smaller than East longitude."
+        )
+
+    if south >= north:
+
+        raise ValueError(
+            "South latitude must be smaller than North latitude."
+        )
+
+    bbox = [
+        west,
+        south,
+        east,
+        north
+    ]
+
+    print(
+        "✓ Custom AOI:",
+        bbox
     )
+
+    return bbox
+
+
+# ============================================================
+# TIME INPUT
+# ============================================================
+
+def parse_date(
+    value
+):
+
+    try:
+
+        return datetime.strptime(
+            value,
+            "%Y-%m-%d"
+        ).replace(
+            tzinfo=timezone.utc
+        )
+
+    except ValueError:
+
+        raise ValueError(
+            "Date format must be YYYY-MM-DD."
+        )
+
+
+def get_time_range():
+
+    print()
+    print("=" * 70)
+    print("SELECT TIME RANGE")
+    print("=" * 70)
+
+    print(
+        "1 = Latest available scene"
+    )
+
+    print(
+        "2 = Exact date range"
+    )
+
+    choice = input(
+        "Choose option (1/2): "
+    ).strip()
+
+    # --------------------------------------------------------
+    # OPTION 1 — LATEST
+    # --------------------------------------------------------
+
+    if choice in (
+        "",
+        "1"
+    ):
+
+        days_text = input(
+            "Search previous how many days? "
+            "(default 14): "
+        ).strip()
+
+        if not days_text:
+
+            days = 14
+
+        else:
+
+            try:
+
+                days = int(
+                    days_text
+                )
+
+            except ValueError:
+
+                raise ValueError(
+                    "Days must be an integer."
+                )
+
+            if days <= 0:
+
+                raise ValueError(
+                    "Days must be greater than 0."
+                )
+
+        end = datetime.now(
+            timezone.utc
+        )
+
+        start = (
+            end
+            - timedelta(days=days)
+        )
+
+        return {
+            "mode":
+            "latest",
+
+            "start":
+            start,
+
+            "end":
+            end
+        }
+
+    # --------------------------------------------------------
+    # OPTION 2 — EXACT RANGE
+    # --------------------------------------------------------
+
+    elif choice == "2":
+
+        print()
+        print(
+            "Enter dates in YYYY-MM-DD format."
+        )
+
+        start_text = input(
+            "Start date: "
+        ).strip()
+
+        end_text = input(
+            "End date: "
+        ).strip()
+
+        start = parse_date(
+            start_text
+        )
+
+        end = parse_date(
+            end_text
+        )
+
+        # Include entire end date
+        end = (
+            end
+            + timedelta(
+                days=1
+            )
+            - timedelta(
+                seconds=1
+            )
+        )
+
+        if start >= end:
+
+            raise ValueError(
+                "Start date must be before End date."
+            )
+
+        return {
+            "mode":
+            "exact",
+
+            "start":
+            start,
+
+            "end":
+            end
+        }
+
+    else:
+
+        raise ValueError(
+            "Choose 1 or 2."
+        )
+
+
+# ============================================================
+# SENTINEL-1 SEARCH
+# ============================================================
+
+def search_scene(
+    bbox,
+    time_range
+):
+
+    start = time_range[
+        "start"
+    ]
+
+    end = time_range[
+        "end"
+    ]
 
     payload = {
 
@@ -113,36 +350,46 @@ def search_latest_scene():
             "sentinel-1-grd"
         ],
 
-        "bbox": BBOX,
+        "bbox":
+        bbox,
 
-        "datetime": (
+        "datetime":
+        (
             f"{start.isoformat()}/"
-            f"{now.isoformat()}"
+            f"{end.isoformat()}"
         ),
 
-        "limit": 20
+        "limit":
+        100
     }
 
     print()
     print("=" * 70)
-    print("STEP 1 — SEARCHING LATEST SENTINEL-1")
+    print("STEP 1 — SEARCHING SENTINEL-1")
     print("=" * 70)
 
-    try:
+    print(
+        "AOI:",
+        bbox
+    )
 
-        response = requests.post(
-            STAC_URL,
-            json=payload,
-            timeout=120
-        )
+    print(
+        "From:",
+        start.isoformat()
+    )
 
-        response.raise_for_status()
+    print(
+        "To:",
+        end.isoformat()
+    )
 
-    except requests.RequestException as error:
+    response = requests.post(
+        STAC_URL,
+        json=payload,
+        timeout=120
+    )
 
-        raise RuntimeError(
-            f"Sentinel-1 STAC search failed: {error}"
-        )
+    response.raise_for_status()
 
     products = (
         response
@@ -156,8 +403,7 @@ def search_latest_scene():
     if not products:
 
         raise RuntimeError(
-            "No recent Sentinel-1 products found "
-            "for the selected AOI."
+            "No Sentinel-1 scenes found for this AOI/date range."
         )
 
     usable = []
@@ -190,7 +436,7 @@ def search_latest_scene():
     if not usable:
 
         raise RuntimeError(
-            "No recent Sentinel-1 IW + VV scene found."
+            "No Sentinel-1 IW + VV scene found."
         )
 
     usable.sort(
@@ -205,20 +451,25 @@ def search_latest_scene():
         reverse=True
     )
 
-    latest = usable[0]
+    selected = usable[0]
 
-    props = latest.get(
+    props = selected.get(
         "properties",
         {}
     )
 
+    print()
     print(
-        "✓ Latest scene found"
+        f"✓ Found {len(usable)} usable scene(s)"
+    )
+
+    print(
+        "✓ Selected most recent scene in requested period"
     )
 
     print(
         "ID:",
-        latest.get("id")
+        selected.get("id")
     )
 
     print(
@@ -232,7 +483,7 @@ def search_latest_scene():
     )
 
     print(
-        "Instrument mode:",
+        "Mode:",
         props.get(
             "sar:instrument_mode"
         )
@@ -245,12 +496,11 @@ def search_latest_scene():
         )
     )
 
-    return latest
+    return selected
 
 
 # ============================================================
-# STEP 2
-# SENTINEL HUB ACCESS TOKEN
+# AUTH TOKEN
 # ============================================================
 
 def get_process_token():
@@ -269,34 +519,25 @@ def get_process_token():
     ):
 
         raise RuntimeError(
-            "SH_CLIENT_ID or SH_CLIENT_SECRET "
-            "missing in .env"
+            "SH_CLIENT_ID / SH_CLIENT_SECRET missing from .env"
         )
 
-    try:
+    response = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type":
+            "client_credentials",
 
-        response = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type":
-                "client_credentials",
+            "client_id":
+            client_id,
 
-                "client_id":
-                client_id,
+            "client_secret":
+            client_secret,
+        },
+        timeout=60
+    )
 
-                "client_secret":
-                client_secret,
-            },
-            timeout=60
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException as error:
-
-        raise RuntimeError(
-            f"Copernicus authentication failed: {error}"
-        )
+    response.raise_for_status()
 
     return (
         response
@@ -306,12 +547,13 @@ def get_process_token():
 
 
 # ============================================================
-# STEP 3
-# DOWNLOAD LATEST GEOCODED VV AOI
+# DOWNLOAD SELECTED SCENE AOI
 # ============================================================
 
 def download_scene_aoi(
-    scene
+    scene,
+    bbox,
+    requested_time_range
 ):
 
     props = scene.get(
@@ -326,7 +568,7 @@ def download_scene_aoi(
     if not scene_datetime:
 
         raise RuntimeError(
-            "Scene acquisition timestamp missing."
+            "Scene timestamp missing."
         )
 
     acquisition = (
@@ -339,7 +581,6 @@ def download_scene_aoi(
         )
     )
 
-    # Small time window around selected acquisition
     start_time = (
         acquisition
         - timedelta(minutes=1)
@@ -381,7 +622,8 @@ def download_scene_aoi(
 
             "bounds": {
 
-                "bbox": BBOX,
+                "bbox":
+                bbox,
 
                 "properties": {
                     "crs":
@@ -465,28 +707,20 @@ def download_scene_aoi(
 
     print()
     print("=" * 70)
-    print("STEP 2 — DOWNLOADING GEOCODED VV AOI")
+    print("STEP 2 — FETCHING GEOCODED VV AOI")
     print("=" * 70)
 
-    try:
+    response = requests.post(
+        PROCESS_URL,
+        headers={
+            "Authorization":
+            f"Bearer {token}"
+        },
+        json=request_body,
+        timeout=240
+    )
 
-        response = requests.post(
-            PROCESS_URL,
-            headers={
-                "Authorization":
-                f"Bearer {token}"
-            },
-            json=request_body,
-            timeout=240
-        )
-
-        response.raise_for_status()
-
-    except requests.RequestException as error:
-
-        raise RuntimeError(
-            f"Sentinel Hub Process API failed: {error}"
-        )
+    response.raise_for_status()
 
     OUTPUT_TIF.write_bytes(
         response.content
@@ -524,7 +758,22 @@ def download_scene_aoi(
         ),
 
         "analysis_bbox":
-        BBOX
+        bbox,
+
+        "requested_time_mode":
+        requested_time_range.get(
+            "mode"
+        ),
+
+        "requested_start":
+        requested_time_range[
+            "start"
+        ].isoformat(),
+
+        "requested_end":
+        requested_time_range[
+            "end"
+        ].isoformat()
     }
 
     METADATA_FILE.write_text(
@@ -536,7 +785,7 @@ def download_scene_aoi(
     )
 
     print(
-        "✓ Latest georeferenced VV AOI saved"
+        "✓ GeoTIFF saved:"
     )
 
     print(
@@ -545,15 +794,14 @@ def download_scene_aoi(
 
 
 # ============================================================
-# STEP 4
-# RUN TRAINED U-NET INFERENCE
+# RUN MODEL
 # ============================================================
 
 def run_inference():
 
     print()
     print("=" * 70)
-    print("STEP 3 — RUNNING U-NET SPILL DETECTION")
+    print("STEP 3 — RUNNING U-NET")
     print("=" * 70)
 
     env = os.environ.copy()
@@ -564,18 +812,14 @@ def run_inference():
         BASE_DIR
     )
 
-    inference_file = (
-        BASE_DIR
-        / "src"
-        / "satellite"
-        / "sentinel1_inference.py"
-    )
-
     subprocess.run(
         [
             sys.executable,
             str(
-                inference_file
+                BASE_DIR
+                / "src"
+                / "satellite"
+                / "sentinel1_inference.py"
             )
         ],
         env=env,
@@ -584,20 +828,15 @@ def run_inference():
 
 
 # ============================================================
-# FINAL CLEAN SUMMARY
+# SUMMARY
 # ============================================================
 
 def print_final_summary():
 
     if not RESULT_PATH.exists():
 
-        print()
         print(
-            "Result file not found:"
-        )
-
-        print(
-            RESULT_PATH
+            "Result file not found."
         )
 
         return
@@ -610,7 +849,7 @@ def print_final_summary():
 
     print()
     print("=" * 70)
-    print("OILTRACE AI — LIVE DETECTION SUMMARY")
+    print("OILTRACE AI — ANALYSIS SUMMARY")
     print("=" * 70)
 
     print(
@@ -628,13 +867,6 @@ def print_final_summary():
     )
 
     print(
-        "Platform:",
-        result.get(
-            "platform"
-        )
-    )
-
-    print(
         "Acquisition:",
         result.get(
             "acquisition_timestamp"
@@ -647,7 +879,7 @@ def print_final_summary():
     )
 
     print(
-        "Candidate spill detected:",
+        "Candidate spill:",
         "YES"
         if detected
         else "NO"
@@ -655,14 +887,9 @@ def print_final_summary():
 
     if detected:
 
-        area = result.get(
-            "spill_area_km2",
-            0.0
-        )
-
         print(
-            "Candidate area:",
-            f"{area:.2f} km²"
+            "Area:",
+            f"{result.get('spill_area_km2', 0):.2f} km²"
         )
 
         confidence = result.get(
@@ -672,12 +899,12 @@ def print_final_summary():
         if confidence is not None:
 
             print(
-                "Detection confidence:",
+                "Confidence:",
                 f"{confidence * 100:.1f}%"
             )
 
         print(
-            "Detected polygons:",
+            "Polygons:",
             result.get(
                 "number_of_polygons",
                 0
@@ -691,7 +918,7 @@ def print_final_summary():
         if location:
 
             print(
-                "Candidate location:",
+                "Centroid:",
                 f"{location['lat']:.4f}, "
                 f"{location['lon']:.4f}"
             )
@@ -699,9 +926,8 @@ def print_final_summary():
     else:
 
         print(
-            "Result:",
-            "No reliable candidate oil spill "
-            "retained after post-processing."
+            "No reliable candidate retained "
+            "after post-processing."
         )
 
     print(
@@ -711,172 +937,108 @@ def print_final_summary():
         )
     )
 
-    print(
-        "Threshold:",
-        result.get(
-            "threshold"
-        )
-    )
-
-    print()
-    print(
-        "Result JSON:"
-    )
-
-    print(
-        RESULT_PATH
-    )
-
-    print()
-    print(
-        "Overlay:"
-    )
-
-    print(
-        OVERLAY_PATH
-    )
-
-    print("=" * 70)
-
-    print(
-        "NOTE: Candidate detections are model outputs "
-        "and are not confirmed oil spills."
-    )
-
     print("=" * 70)
 
 
 # ============================================================
-# AUTO OPEN OVERLAY
+# OPEN OVERLAY
 # ============================================================
 
 def open_overlay():
 
     if not OVERLAY_PATH.exists():
-
-        print(
-            "Overlay file not found:"
-        )
-
-        print(
-            OVERLAY_PATH
-        )
-
         return
 
     system = platform.system()
 
-    try:
+    if system == "Darwin":
 
-        if system == "Darwin":
-
-            subprocess.run(
-                [
-                    "open",
-                    str(
-                        OVERLAY_PATH
-                    )
-                ],
-                check=False
-            )
-
-        elif system == "Windows":
-
-            os.startfile(
+        subprocess.run(
+            [
+                "open",
                 str(
                     OVERLAY_PATH
                 )
-            )
-
-        elif system == "Linux":
-
-            subprocess.run(
-                [
-                    "xdg-open",
-                    str(
-                        OVERLAY_PATH
-                    )
-                ],
-                check=False
-            )
-
-    except Exception as error:
-
-        print(
-            "Could not automatically open overlay:"
+            ],
+            check=False
         )
 
-        print(
-            error
+    elif system == "Windows":
+
+        os.startfile(
+            str(
+                OVERLAY_PATH
+            )
+        )
+
+    elif system == "Linux":
+
+        subprocess.run(
+            [
+                "xdg-open",
+                str(
+                    OVERLAY_PATH
+                )
+            ],
+            check=False
         )
 
 
 # ============================================================
-# MAIN LIVE PIPELINE
+# MAIN
 # ============================================================
 
 def main():
 
     print()
     print("=" * 70)
-    print("OILTRACE AI — LIVE SENTINEL-1 ANALYSIS")
+    print("OILTRACE AI — SENTINEL-1 AREA ANALYSIS")
     print("=" * 70)
-
-    print(
-        "AOI:",
-        BBOX
-    )
 
     try:
 
-        # Latest available Sentinel-1 scene
-        scene = (
-            search_latest_scene()
+        bbox = (
+            get_user_bbox()
         )
 
-        # Get georeferenced VV data
+        time_range = (
+            get_time_range()
+        )
+
+        scene = search_scene(
+            bbox,
+            time_range
+        )
+
         download_scene_aoi(
-            scene
+            scene,
+            bbox,
+            time_range
         )
 
-        # Run trained segmentation model
         run_inference()
 
-        # Print human-readable result
         print_final_summary()
 
-        # Automatically open overlay image
         open_overlay()
 
         print()
-        print("=" * 70)
-        print("✓ LIVE ANALYSIS COMPLETE")
-        print("=" * 70)
+        print(
+            "✓ ANALYSIS COMPLETE"
+        )
 
     except KeyboardInterrupt:
 
-        print()
         print(
-            "Analysis stopped by user."
-        )
-
-    except subprocess.CalledProcessError as error:
-
-        print()
-        print(
-            "Inference process failed."
-        )
-
-        print(
-            error
+            "\nAnalysis stopped."
         )
 
     except Exception as error:
 
         print()
-        print("=" * 70)
-        print("LIVE ANALYSIS FAILED")
-        print("=" * 70)
+        print(
+            "ANALYSIS FAILED:"
+        )
 
         print(
             error

@@ -7,7 +7,8 @@ import rasterio
 from rasterio.features import shapes
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
-from pyproj import Geod
+from pyproj import Geod, Transformer
+from global_land_mask import globe
 import torch
 
 from config import (
@@ -59,7 +60,11 @@ OUTPUT_DIR.mkdir(
 # ============================================================
 
 TILE_SIZE = 256
+
 MIN_COMPONENT_AREA = 50
+
+# Stronger coastline exclusion
+COAST_BUFFER_PIXELS = 12
 
 GEOD = Geod(
     ellps="WGS84"
@@ -67,7 +72,7 @@ GEOD = Geod(
 
 
 # ============================================================
-# LOAD LATEST SCENE METADATA
+# METADATA
 # ============================================================
 
 def load_scene_metadata():
@@ -80,7 +85,7 @@ def load_scene_metadata():
             "acquisition_timestamp": None,
             "platform": None,
             "polarization": ["VV"],
-            "instrument_mode": "IW",
+            "instrument_mode": "IW"
         }
 
     return json.loads(
@@ -91,12 +96,127 @@ def load_scene_metadata():
 
 
 # ============================================================
-# NORMALIZE SAR
+# LAND MASK
+# ============================================================
+
+def create_land_mask(
+    height,
+    width,
+    transform,
+    crs
+):
+
+    print("Creating geographic land mask...")
+
+    rows, cols = np.indices(
+        (
+            height,
+            width
+        ),
+        dtype=np.float64
+    )
+
+    xs = (
+        transform.c
+        + transform.a * (
+            cols + 0.5
+        )
+        + transform.b * (
+            rows + 0.5
+        )
+    )
+
+    ys = (
+        transform.f
+        + transform.d * (
+            cols + 0.5
+        )
+        + transform.e * (
+            rows + 0.5
+        )
+    )
+
+    if (
+        crs is not None
+        and str(crs) != "EPSG:4326"
+    ):
+
+        transformer = Transformer.from_crs(
+            crs,
+            "EPSG:4326",
+            always_xy=True
+        )
+
+        lon, lat = transformer.transform(
+            xs,
+            ys
+        )
+
+    else:
+
+        lon = xs
+        lat = ys
+
+    land_mask = globe.is_land(
+        lat,
+        lon
+    )
+
+    return np.asarray(
+        land_mask,
+        dtype=bool
+    )
+
+
+# ============================================================
+# COAST BUFFER
+# ============================================================
+
+def create_buffered_land_mask(
+    land_mask,
+    buffer_pixels
+):
+
+    land_uint8 = (
+        land_mask.astype(
+            np.uint8
+        )
+    )
+
+    if buffer_pixels <= 0:
+        return land_mask
+
+    size = (
+        buffer_pixels * 2
+        + 1
+    )
+
+    kernel = np.ones(
+        (
+            size,
+            size
+        ),
+        dtype=np.uint8
+    )
+
+    buffered = cv2.dilate(
+        land_uint8,
+        kernel,
+        iterations=1
+    )
+
+    return (
+        buffered > 0
+    )
+
+
+# ============================================================
+# NORMALIZATION
 # ============================================================
 
 def normalize_sar(
     image,
-    valid_mask
+    valid_ocean_mask
 ):
 
     image = np.asarray(
@@ -104,9 +224,11 @@ def normalize_sar(
         dtype=np.float32
     )
 
-    valid_mask = (
-        valid_mask.astype(bool)
-        & np.isfinite(image)
+    usable = (
+        valid_ocean_mask
+        & np.isfinite(
+            image
+        )
     )
 
     output = np.zeros_like(
@@ -114,11 +236,11 @@ def normalize_sar(
         dtype=np.float32
     )
 
-    if not valid_mask.any():
+    if not usable.any():
         return output
 
     values = image[
-        valid_mask
+        usable
     ]
 
     low = np.percentile(
@@ -141,22 +263,24 @@ def normalize_sar(
     )
 
     output[
-        valid_mask
+        usable
     ] = (
-        clipped[valid_mask] - low
+        clipped[usable]
+        - low
     ) / (
-        high - low
+        high
+        - low
     )
 
     output[
-        ~valid_mask
+        ~usable
     ] = 0
 
     return output
 
 
 # ============================================================
-# LOAD TRAINED U-NET
+# LOAD MODEL
 # ============================================================
 
 def load_model():
@@ -207,8 +331,9 @@ def predict_tile(
 
         probability = (
             torch
-            .sigmoid(logits)
-            [0, 0]
+            .sigmoid(
+                logits
+            )[0, 0]
             .cpu()
             .numpy()
         )
@@ -217,12 +342,12 @@ def predict_tile(
 
 
 # ============================================================
-# FALSE-POSITIVE CLEANING
+# COMPONENT CLEANING
 # ============================================================
 
 def clean_mask(
     mask,
-    valid_mask,
+    ocean_mask,
     min_area=50
 ):
 
@@ -230,12 +355,13 @@ def clean_mask(
         np.uint8
     )
 
-    valid_mask = valid_mask.astype(
+    ocean_mask = ocean_mask.astype(
         bool
     )
 
+    # Hard rule: no prediction outside ocean
     mask[
-        ~valid_mask
+        ~ocean_mask
     ] = 0
 
     number_labels, labels, stats, _ = (
@@ -250,24 +376,25 @@ def clean_mask(
         dtype=np.uint8
     )
 
-    invalid_mask = (
-        ~valid_mask
+    h, w = mask.shape
+
+    # Create a safety band around invalid/land pixels
+    invalid = (
+        ~ocean_mask
     ).astype(
         np.uint8
     )
 
-    dilated_invalid = cv2.dilate(
-        invalid_mask,
+    invalid_buffer = cv2.dilate(
+        invalid,
         np.ones(
-            (5, 5),
+            (7, 7),
             np.uint8
         ),
         iterations=1
     ).astype(
         bool
     )
-
-    height, width = mask.shape
 
     for label in range(
         1,
@@ -286,21 +413,21 @@ def clean_mask(
             labels == label
         )
 
-        touches_image_border = (
+        touches_border = (
             component[0, :].any()
-            or component[height - 1, :].any()
+            or component[h - 1, :].any()
             or component[:, 0].any()
-            or component[:, width - 1].any()
+            or component[:, w - 1].any()
         )
 
-        touches_invalid_boundary = (
+        touches_land_or_coast = (
             component
-            & dilated_invalid
+            & invalid_buffer
         ).any()
 
         if (
-            touches_image_border
-            or touches_invalid_boundary
+            touches_border
+            or touches_land_or_coast
         ):
             continue
 
@@ -308,15 +435,16 @@ def clean_mask(
             component
         ] = 1
 
+    # Final hard mask AGAIN
     cleaned[
-        ~valid_mask
+        ~ocean_mask
     ] = 0
 
     return cleaned
 
 
 # ============================================================
-# GEODESIC AREA
+# AREA
 # ============================================================
 
 def calculate_area_km2(
@@ -329,12 +457,10 @@ def calculate_area_km2(
         )
     )
 
-    area_m2 = abs(
-        area_m2
-    )
-
     return (
-        area_m2
+        abs(
+            area_m2
+        )
         / 1_000_000
     )
 
@@ -345,9 +471,10 @@ def calculate_area_km2(
 
 def main():
 
+    print()
     print("=" * 72)
     print(
-        "OILTRACE AI - MEMBER 1 REAL SENTINEL-1 PIPELINE"
+        "OILTRACE AI - SENTINEL-1 OCEAN-ONLY INFERENCE"
     )
     print("=" * 72)
 
@@ -363,7 +490,7 @@ def main():
     )
 
     print(
-        "Acquisition time:",
+        "Acquisition:",
         scene_metadata.get(
             "acquisition_timestamp"
         )
@@ -385,11 +512,13 @@ def main():
         INPUT_TIF
     ) as src:
 
-        # Band 1 = VV
-        vv = src.read(1)
+        vv = src.read(
+            1
+        )
 
-        # Band 2 = Sentinel Hub dataMask
-        data_mask = src.read(2)
+        data_mask = src.read(
+            2
+        )
 
         transform = src.transform
         crs = src.crs
@@ -398,7 +527,7 @@ def main():
         bounds = src.bounds
 
     print(
-        "✓ Sentinel-1 VV GeoTIFF loaded"
+        "✓ Sentinel-1 GeoTIFF loaded"
     )
 
     print(
@@ -419,37 +548,97 @@ def main():
     )
 
     # ========================================================
-    # VALID DATA
+    # VALID SATELLITE COVERAGE
     # ========================================================
 
-    valid_mask = (
+    satellite_valid_mask = (
         data_mask > 0
     )
 
-    valid_pixels = int(
-        valid_mask.sum()
-    )
-
     print(
-        "Valid pixels:",
-        valid_pixels
+        "Satellite valid pixels:",
+        int(
+            satellite_valid_mask.sum()
+        )
     )
 
     # ========================================================
-    # NORMALIZATION
+    # LAND MASK
+    # ========================================================
+
+    land_mask = create_land_mask(
+        height,
+        width,
+        transform,
+        crs
+    )
+
+    print(
+        "✓ Land mask created"
+    )
+
+    print(
+        "Land pixels:",
+        int(
+            land_mask.sum()
+        )
+    )
+
+    # ========================================================
+    # BUFFER COAST
+    # ========================================================
+
+    buffered_land_mask = (
+        create_buffered_land_mask(
+            land_mask,
+            COAST_BUFFER_PIXELS
+        )
+    )
+
+    print(
+        f"✓ Coast buffer applied: "
+        f"{COAST_BUFFER_PIXELS} pixels"
+    )
+
+    # ========================================================
+    # FINAL USABLE OCEAN MASK
+    # ========================================================
+
+    ocean_mask = (
+        satellite_valid_mask
+        & ~buffered_land_mask
+    )
+
+    ocean_pixels = int(
+        ocean_mask.sum()
+    )
+
+    print(
+        "Usable ocean pixels:",
+        ocean_pixels
+    )
+
+    if ocean_pixels == 0:
+
+        raise RuntimeError(
+            "No valid ocean pixels found in selected AOI."
+        )
+
+    # ========================================================
+    # NORMALIZE OCEAN ONLY
     # ========================================================
 
     vv = normalize_sar(
         vv,
-        valid_mask
+        ocean_mask
     )
 
     print(
-        "✓ SAR normalization complete"
+        "✓ Ocean-only normalization complete"
     )
 
     # ========================================================
-    # TILE-WISE INFERENCE
+    # INFERENCE
     # ========================================================
 
     final_probability = np.zeros(
@@ -506,12 +695,12 @@ def main():
                 x:x + valid_w
             ]
 
-            tile_mask = valid_mask[
+            tile_ocean = ocean_mask[
                 y:y + valid_h,
                 x:x + valid_w
             ]
 
-            if not tile_mask.any():
+            if not tile_ocean.any():
 
                 print(
                     f"\rTiles: "
@@ -545,8 +734,9 @@ def main():
                 :valid_w
             ]
 
+            # Strict ocean-only probability
             probability[
-                ~tile_mask
+                ~tile_ocean
             ] = 0
 
             final_probability[
@@ -570,9 +760,17 @@ def main():
     )
 
     print(
-        "Tiles processed by model:",
+        "Tiles processed:",
         model_tiles
     )
+
+    # ========================================================
+    # FINAL HARD MASK BEFORE THRESHOLD
+    # ========================================================
+
+    final_probability[
+        ~ocean_mask
+    ] = 0
 
     # ========================================================
     # THRESHOLD
@@ -585,26 +783,32 @@ def main():
         np.uint8
     )
 
+    # hard mask again
     final_mask[
-        ~valid_mask
+        ~ocean_mask
     ] = 0
 
     # ========================================================
-    # CLEAN FALSE POSITIVES
+    # CLEANING
     # ========================================================
 
     final_mask = clean_mask(
         final_mask,
-        valid_mask,
+        ocean_mask,
         MIN_COMPONENT_AREA
     )
 
+    # final safety check
+    final_mask[
+        ~ocean_mask
+    ] = 0
+
     print(
-        "✓ False-positive cleaning complete"
+        "✓ Strict land/coast filtering complete"
     )
 
     # ========================================================
-    # BASIC STATS
+    # STATS
     # ========================================================
 
     oil_pixels = int(
@@ -616,14 +820,11 @@ def main():
     )
 
     oil_fraction = (
-        oil_pixels / valid_pixels
-        if valid_pixels > 0
+        oil_pixels
+        / ocean_pixels
+        if ocean_pixels > 0
         else 0.0
     )
-
-    # ========================================================
-    # CONFIDENCE
-    # ========================================================
 
     if spill_detected:
 
@@ -640,15 +841,15 @@ def main():
     max_candidate_probability = (
         float(
             final_probability[
-                valid_mask
+                ocean_mask
             ].max()
         )
-        if valid_mask.any()
+        if ocean_mask.any()
         else 0.0
     )
 
     # ========================================================
-    # GEO POLYGONS
+    # POLYGONS
     # ========================================================
 
     polygon_objects = []
@@ -658,7 +859,7 @@ def main():
         final_mask,
         mask=(
             final_mask.astype(bool)
-            & valid_mask
+            & ocean_mask
         ),
         transform=transform
     ):
@@ -677,17 +878,17 @@ def main():
             polygon
         )
 
-        polygon_area = (
-            calculate_area_km2(
-                polygon
-            )
+        polygon_area = calculate_area_km2(
+            polygon
         )
 
         geojson_features.append(
             {
-                "type": "Feature",
+                "type":
+                "Feature",
 
-                "geometry": mapping(
+                "geometry":
+                mapping(
                     polygon
                 ),
 
@@ -712,16 +913,12 @@ def main():
 
     if polygon_objects:
 
-        merged_geometry = (
-            unary_union(
-                polygon_objects
-            )
+        merged_geometry = unary_union(
+            polygon_objects
         )
 
-        spill_area_km2 = (
-            calculate_area_km2(
-                merged_geometry
-            )
+        spill_area_km2 = calculate_area_km2(
+            merged_geometry
         )
 
         centroid = (
@@ -771,7 +968,7 @@ def main():
     )
 
     # ========================================================
-    # IMAGE OUTPUTS
+    # VISUAL OUTPUTS
     # ========================================================
 
     vv_png = (
@@ -816,13 +1013,28 @@ def main():
         cv2.COLOR_GRAY2BGR
     )
 
+    # Only ocean shown from VV
     overlay[
-        valid_mask
+        ocean_mask
     ] = vv_rgb[
-        valid_mask
+        ocean_mask
     ]
 
-    # red candidate spill areas
+    # Land shown in dark grey
+    land_display = (
+        satellite_valid_mask
+        & buffered_land_mask
+    )
+
+    overlay[
+        land_display
+    ] = (
+        70,
+        70,
+        70
+    )
+
+    # Red only in valid ocean
     overlay[
         final_mask == 1
     ] = (
@@ -863,8 +1075,35 @@ def main():
         overlay
     )
 
+    # Save masks for debugging
+    cv2.imwrite(
+        str(
+            OUTPUT_DIR
+            / "land_mask.png"
+        ),
+        (
+            land_mask.astype(
+                np.uint8
+            )
+            * 255
+        )
+    )
+
+    cv2.imwrite(
+        str(
+            OUTPUT_DIR
+            / "ocean_mask.png"
+        ),
+        (
+            ocean_mask.astype(
+                np.uint8
+            )
+            * 255
+        )
+    )
+
     # ========================================================
-    # FINAL MEMBER 1 RESULT
+    # RESULT JSON
     # ========================================================
 
     result = {
@@ -918,13 +1157,26 @@ def main():
         "threshold":
         MASK_THRESHOLD,
 
-        "valid_pixels":
-        valid_pixels,
+        "coast_buffer_pixels":
+        COAST_BUFFER_PIXELS,
+
+        "satellite_valid_pixels":
+        int(
+            satellite_valid_mask.sum()
+        ),
+
+        "land_pixels":
+        int(
+            land_mask.sum()
+        ),
+
+        "ocean_pixels":
+        ocean_pixels,
 
         "oil_pixels":
         oil_pixels,
 
-        "oil_fraction_of_valid_area":
+        "oil_fraction_of_ocean_area":
         oil_fraction,
 
         "number_of_polygons":
@@ -964,9 +1216,9 @@ def main():
 
         "note":
         (
-            "Satellite model output only. "
-            "Detected regions are candidate oil-spill "
-            "regions and require further validation."
+            "Land and coastline pixels are excluded. "
+            "Remaining detections are ocean-only candidate "
+            "oil-spill regions and require validation."
         )
     }
 
@@ -984,7 +1236,6 @@ def main():
     )
 
     print()
-
     print("=" * 72)
     print(
         "MEMBER 1 FINAL OUTPUT"
@@ -999,7 +1250,6 @@ def main():
     )
 
     print()
-
     print(
         "Outputs saved:"
     )
